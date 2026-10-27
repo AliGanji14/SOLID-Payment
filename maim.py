@@ -1,7 +1,14 @@
 import requests
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
+
+
+class NetworkError(Exception):
+    def __init__(self, message, error_code):
+        self.message = message
+        self.error_code = error_code
+        super().__init__(self.message)
 
 
 @dataclass
@@ -10,6 +17,7 @@ class InitialPaymentResponse:
     message: str
     code: str
     authority: Optional[str] = None
+    raw: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -19,9 +27,12 @@ class VerifyPaymentResponse:
     code: str
     ref_id: Optional[str] = None
     trans_id: Optional[str] = None
+    raw: dict = field(default_factory=dict)
 
 
 class AbstractPaymentGateway(ABC):
+    request_timeout = 30
+
     @abstractmethod
     def initiate_payment():
         pass
@@ -37,6 +48,21 @@ class AbstractPaymentGateway(ABC):
     @abstractmethod
     def activate_sandbox():
         pass
+
+    def _make_request(self, url, payload):
+        headers = {"content-type": "application/json"}
+        try:
+            response = requests.post(url=url, json=payload, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except requests.Timeout:
+            raise NetworkError("connection timeout", error_code=408)
+        except requests.HTTPError:
+            raise NetworkError("HTTP error", error_code=response.status_code)
+        except requests.ConnectionError:
+            raise NetworkError("HTTP connection error", error_code=503)
+        except requests.RequestException:
+            raise NetworkError("request exception", error_code=500)
 
 
 class NovinoPayGateway(AbstractPaymentGateway):
@@ -62,32 +88,21 @@ class NovinoPayGateway(AbstractPaymentGateway):
         if name := kwargs.get("name"):
             payload.update({"name": name})
 
-        headers = {"content-type": "application/json"}
-
-        try:
-            response = requests.post(
-                url=self.payment_init_url, json=payload, headers=headers
-            ).json()
-            if int(response["status"]) in self.success_status_codes:
-                return InitialPaymentResponse(
-                    success=True,
-                    message=response["message"],
-                    code=response["status"],
-                    authority=response["data"]["authority"],
-                )
-            else:
-                return InitialPaymentResponse(
-                    success=False,
-                    message=response["message"],
-                    code=response["status"],
-                    authority=None,
-                )
-        except:
-            return {
-                "success": False,
-                "message": "connection error",
-                "code": "-1000",
-            }
+        response = self._make_request(self.payment_init_url, payload=payload)
+        if int(response["status"]) in self.success_status_codes:
+            return InitialPaymentResponse(
+                success=True,
+                message=response["message"],
+                code=response["status"],
+                authority=response["data"]["authority"],
+            )
+        else:
+            return InitialPaymentResponse(
+                success=False,
+                message=response["message"],
+                code=response["status"],
+                authority=None,
+            )
 
     def generate_payment_url(self, authority):
         return self.payment_gateway_url + str(authority)
@@ -100,30 +115,21 @@ class NovinoPayGateway(AbstractPaymentGateway):
         }
         headers = {"content-type": "application/json"}
 
-        try:
-            response = requests.post(
-                url=self.payment_verify_url, json=payload, headers=headers
-            ).json()
-            if int(response["status"]) in self.success_status_codes:
-                return VerifyPaymentResponse(
-                    success=True,
-                    message=response["message"],
-                    code=response["status"],
-                    ref_id=response["data"]["ref_id"],
-                    trans_id=response["data"]["trans_id"],
-                )
-            else:
-                return VerifyPaymentResponse(
-                    success=True,
-                    message=response["message"],
-                    code=response["status"],
-                )
-        except:
-            return {
-                "success": False,
-                "message": "connection error",
-                "code": "-1000",
-            }
+        response = self._make_request(self.payment_verify_url, payload=payload)
+        if int(response["status"]) in self.success_status_codes:
+            return VerifyPaymentResponse(
+                success=True,
+                message=response["message"],
+                code=response["status"],
+                ref_id=response["data"]["ref_id"],
+                trans_id=response["data"]["trans_id"],
+            )
+        else:
+            return VerifyPaymentResponse(
+                success=True,
+                message=response["message"],
+                code=response["status"],
+            )
 
     def activate_sandbox(self):
         self.payment_init_url = "https://api.novinopay.com/payment/ipg/v2/request"
